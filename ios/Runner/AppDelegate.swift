@@ -10,6 +10,9 @@ import GoogleMaps
   ) -> Bool {
 
     GeneratedPluginRegistrant.register(with: self)
+    if #available(iOS 10.0, *) {
+      UNUserNotificationCenter.current().delegate = self as? UNUserNotificationCenterDelegate
+    }
      GMSServices.provideAPIKey("AIzaSyCGcz2NIWrB4jTBKWcg2oSQF89MHXXq2og")
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }

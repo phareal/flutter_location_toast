@@ -1,8 +1,12 @@
 import 'package:date_format/date_format.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:fluttertoast/fluttertoast.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:location/location.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/cupertino.dart';
+import 'package:rxdart/rxdart.dart';
 
 import 'dart:async';
 import 'Helpers/PinInfo.dart';
@@ -22,12 +26,48 @@ const simpleTaskKey = "simpleTask";
 const simpleDelayedTask = "simpleDelayedTask";
 const simplePeriodicTask = "simplePeriodicTask";
 const simplePeriodic1HourTask = "simplePeriodic1HourTask";
+FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+var initializationSettingsAndroid = AndroidInitializationSettings('app_icon');
+var iOSInit = IOSInitializationSettings();
+NotificationAppLaunchDetails notificationAppLaunchDetails;
 
+final BehaviorSubject<ReceivedNotification> didReceiveLocalNotificationSubject =
+BehaviorSubject<ReceivedNotification>();
 
+void main() async{
+  WidgetsFlutterBinding.ensureInitialized();
+  notificationAppLaunchDetails = await flutterLocalNotificationsPlugin.getNotificationAppLaunchDetails();
 
-
-void main(){
+  var initializationSettingsAndroid = AndroidInitializationSettings('app_icon');
+  // Note: permissions aren't requested here just to demonstrate that can be done later using the `requestPermissions()` method
+  // of the `IOSFlutterLocalNotificationsPlugin` class
+  var initializationSettingsIOS = IOSInitializationSettings(
+      requestAlertPermission: false,
+      requestBadgePermission: false,
+      requestSoundPermission: false,
+      onDidReceiveLocalNotification:
+          (int id, String title, String body, String payload) async {
+        didReceiveLocalNotificationSubject.add(ReceivedNotification(
+            id: id, title: title, body: body, payload: payload));
+      });
+  var initializationSettings = InitializationSettings(
+      initializationSettingsAndroid, initializationSettingsIOS);
+  await flutterLocalNotificationsPlugin.initialize(initializationSettings);
   runApp(MaterialApp(debugShowCheckedModeBanner: false, home: MapPage()));
+}
+
+class ReceivedNotification {
+  final int id;
+  final String title;
+  final String body;
+  final String payload;
+
+  ReceivedNotification({
+    @required this.id,
+    @required this.title,
+    @required this.body,
+    @required this.payload,
+  });
 }
 
 
@@ -37,7 +77,9 @@ class MapPage extends StatefulWidget {
   State<StatefulWidget> createState() => MapPageState();
 }
 
-class MapPageState extends State<MapPage> {
+class MapPageState extends State<MapPage> with WidgetsBindingObserver {
+
+  AppLifecycleState _lifecycleState;
   Completer<GoogleMapController> _controller = Completer();
   Set<Marker> _markers = Set<Marker>();
 // for my drawn routes on the map
@@ -68,6 +110,7 @@ class MapPageState extends State<MapPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
 
 
     // create an instance of Location
@@ -90,9 +133,42 @@ class MapPageState extends State<MapPage> {
     // set the initial location
     setInitialLocation();
 
+    _requestIOSPermissions();
+    _configureDidReceiveLocalNotificationSubject();
 
 
 
+
+  }
+
+  void _requestIOSPermissions() {
+    flutterLocalNotificationsPlugin
+        .resolvePlatformSpecificImplementation<
+        IOSFlutterLocalNotificationsPlugin>()
+        ?.requestPermissions(
+      alert: true,
+      badge: true,
+      sound: true,
+    );
+  }
+
+  void _configureDidReceiveLocalNotificationSubject() {
+    didReceiveLocalNotificationSubject.stream
+        .listen((ReceivedNotification receivedNotification) async {
+      await showDialog(
+        context: context,
+        builder: (BuildContext context) => CupertinoAlertDialog(
+          title: receivedNotification.title != null
+              ? Text(receivedNotification.title)
+              : null,
+          content: receivedNotification.body != null
+              ? Text(receivedNotification.body)
+              : null,
+          actions: [
+          ],
+        ),
+      );
+    });
   }
 
 
@@ -131,6 +207,8 @@ class MapPageState extends State<MapPage> {
 
   @override
   Widget build(BuildContext context) {
+
+    print("state is ${this._lifecycleState}");
 
     CameraPosition initialCameraPosition = CameraPosition(
         zoom: CAMERA_ZOOM,
@@ -181,6 +259,7 @@ class MapPageState extends State<MapPage> {
     // get a LatLng for the source location
     // from the LocationData currentLocation object
 
+
     Fluttertoast.showToast(
         msg: "${currentLocation.latitude} ${currentLocation.longitude}",
         toastLength: Toast.LENGTH_SHORT,
@@ -191,7 +270,6 @@ class MapPageState extends State<MapPage> {
         fontSize: 16.0
     );
 
-    print("dsdsdsd");
     print("is ${this.isLoaded}");
     var pinPosition;
     if (currentLocation == null){
@@ -222,9 +300,27 @@ class MapPageState extends State<MapPage> {
 
 
 
-        new Timer.periodic(Duration(seconds: 15),(Timer t)=>{
+        if(this._lifecycleState == AppLifecycleState.paused){
+        print("object");
 
-          Fluttertoast.showToast(
+    }
+
+
+
+
+        new Timer.periodic(Duration(seconds: 2),(Timer t)=>{
+
+          if(_lifecycleState == AppLifecycleState.paused){
+            _showNotification()
+          },
+
+          if(_lifecycleState == AppLifecycleState.detached){
+            _showNotification()
+          },
+
+        print("state is from ${this._lifecycleState}"),
+
+              Fluttertoast.showToast(
               msg: "${currentLocation.latitude} ${currentLocation.longitude}",
               toastLength: Toast.LENGTH_SHORT,
               gravity: ToastGravity.BOTTOM,
@@ -303,6 +399,41 @@ class MapPageState extends State<MapPage> {
           position: pinPosition, // updated position
           icon: sourceIcon));
     });
+  }
+
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    setState(() { _lifecycleState = state; });
+  }
+
+  Future<void> _createNotificationChannel() async {
+    var androidNotificationChannel = AndroidNotificationChannel(
+        '1',
+        'geo',
+        'getPosotion',
+    );
+
+    await flutterLocalNotificationsPlugin
+        .resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin>()
+        ?.createNotificationChannel(androidNotificationChannel);
+  }
+
+  Future<void> _showNotification() async {
+    var androidPlatformChannelSpecifics = AndroidNotificationDetails(
+        '1', 'geo', 'geo',
+        importance: Importance.Max, priority: Priority.High, ticker: 'ticker');
+    var iOSPlatformChannelSpecifics = IOSNotificationDetails();
+    var platformChannelSpecifics = NotificationDetails(
+        androidPlatformChannelSpecifics, iOSPlatformChannelSpecifics);
+    await flutterLocalNotificationsPlugin.show(
+        0, 'Position', "${currentLocation.latitude}  ${currentLocation.longitude}", platformChannelSpecifics,
+        payload: 'item x');
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
   }
 }
 
